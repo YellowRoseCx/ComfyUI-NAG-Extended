@@ -46,13 +46,13 @@ class NAGKleinDoubleStreamBlock:
         img_bsz = img.shape[0]
         txt_bsz = txt.shape[0]
         origin_bsz = txt_bsz - img_bsz
-        
+
         # ===== Prepare image for attention =====
         img_modulated = self.img_norm1(img)
         img_modulated = apply_mod(img_modulated, (1 + img_mod1.scale), img_mod1.shift, modulation_dims_img)
         img_qkv = self.img_attn.qkv(img_modulated)
         del img_modulated
-        
+
         img_q, img_k, img_v = img_qkv.view(img_qkv.shape[0], img_qkv.shape[1], 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
         del img_qkv
         img_q, img_k = self.img_attn.norm(img_q, img_k, img_v)
@@ -62,7 +62,7 @@ class NAGKleinDoubleStreamBlock:
         txt_modulated = apply_mod(txt_modulated, (1 + txt_mod1.scale), txt_mod1.shift, modulation_dims_txt)
         txt_qkv = self.txt_attn.qkv(txt_modulated)
         del txt_modulated
-        
+
         txt_q, txt_k, txt_v = txt_qkv.view(txt_qkv.shape[0], txt_qkv.shape[1], 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
         del txt_qkv
         txt_q, txt_k = self.txt_attn.norm(txt_q, txt_k, txt_v)
@@ -88,9 +88,9 @@ class NAGKleinDoubleStreamBlock:
             else:
                 # Need to expand img to match origin_bsz (edge case)
                 repeat_times = (origin_bsz + img_bsz - 1) // img_bsz
-                img_q_neg = img_q.repeat(repeat_times, 1, 1, 1)[-origin_bsz:]
-                img_k_neg = img_k.repeat(repeat_times, 1, 1, 1)[-origin_bsz:]
-                img_v_neg = img_v.repeat(repeat_times, 1, 1, 1)[-origin_bsz:]
+                img_q_neg = img_q.expand(origin_bsz, -1, -1, -1) if img_bsz == 1 else img_q.repeat(repeat_times, 1, 1, 1)[-origin_bsz:]
+                img_k_neg = img_k.expand(origin_bsz, -1, -1, -1) if img_bsz == 1 else img_k.repeat(repeat_times, 1, 1, 1)[-origin_bsz:]
+                img_v_neg = img_v.expand(origin_bsz, -1, -1, -1) if img_bsz == 1 else img_v.repeat(repeat_times, 1, 1, 1)[-origin_bsz:]
         else:
             # No negative path
             txt_q_positive = txt_q[:, :, context_pad_len:]
@@ -114,7 +114,7 @@ class NAGKleinDoubleStreamBlock:
             v_pos = torch.cat((txt_v_positive, img_v), dim=2)
 
         del txt_q_positive, txt_k_positive, txt_v_positive
-        
+
         attn_pos = attention(q_pos, k_pos, v_pos, pe=pe, mask=attn_mask, transformer_options=transformer_options)
         del q_pos, k_pos, v_pos
 
@@ -131,7 +131,7 @@ class NAGKleinDoubleStreamBlock:
 
             del txt_q_negative, txt_k_negative, txt_v_negative
             del img_q_neg, img_k_neg, img_v_neg
-            
+
             attn_neg = attention(q_neg, k_neg, v_neg, pe=pe_negative, mask=attn_mask, transformer_options=transformer_options)
             del q_neg, k_neg, v_neg
         else:
@@ -173,19 +173,19 @@ class NAGKleinDoubleStreamBlock:
             if origin_bsz == img_bsz:
                 # Ideal case - direct NAG
                 img_attn_guided = nag(
-                    img_attn_pos, 
-                    img_attn_neg, 
-                    self.nag_scale, 
-                    self.nag_tau, 
+                    img_attn_pos,
+                    img_attn_neg,
+                    self.nag_scale,
+                    self.nag_tau,
                     self.nag_alpha
                 )
             elif origin_bsz < img_bsz:
                 # Apply NAG only to the last origin_bsz batches, keep others unchanged
                 img_attn_guided_part = nag(
-                    img_attn_pos[-origin_bsz:], 
-                    img_attn_neg, 
-                    self.nag_scale, 
-                    self.nag_tau, 
+                    img_attn_pos[-origin_bsz:],
+                    img_attn_neg,
+                    self.nag_scale,
+                    self.nag_tau,
                     self.nag_alpha
                 )
                 img_attn_guided = torch.cat([img_attn_pos[:-origin_bsz], img_attn_guided_part], dim=0)
@@ -193,12 +193,12 @@ class NAGKleinDoubleStreamBlock:
             else:
                 # origin_bsz > img_bsz - expand img_attn_pos to match
                 repeat_times = (origin_bsz + img_bsz - 1) // img_bsz
-                img_attn_pos_expanded = img_attn_pos.repeat(repeat_times, 1, 1)[-origin_bsz:]
+                img_attn_pos_expanded = img_attn_pos.expand(origin_bsz, -1, -1) if img_bsz == 1 else img_attn_pos.repeat(repeat_times, 1, 1)[-origin_bsz:]
                 img_attn_guided = nag(
-                    img_attn_pos_expanded, 
-                    img_attn_neg, 
-                    self.nag_scale, 
-                    self.nag_tau, 
+                    img_attn_pos_expanded,
+                    img_attn_neg,
+                    self.nag_scale,
+                    self.nag_tau,
                     self.nag_alpha
                 )
                 # Trim back to img_bsz
@@ -206,7 +206,7 @@ class NAGKleinDoubleStreamBlock:
                 del img_attn_pos_expanded
         else:
             img_attn_guided = img_attn_pos
-            
+
         del img_attn_pos
         if img_attn_neg is not None:
             del img_attn_neg
@@ -214,14 +214,14 @@ class NAGKleinDoubleStreamBlock:
         # ===== Calculate img blocks =====
         img_proj = self.img_attn.proj(img_attn_guided)
         del img_attn_guided
-        
+
         img.add_(apply_mod(img_proj, img_mod1.gate, None, modulation_dims_img))
         del img_proj
-        
+
         img_mlp_in = apply_mod(self.img_norm2(img), (1 + img_mod2.scale), img_mod2.shift, modulation_dims_img)
         img_mlp_out = self.img_mlp(img_mlp_in)
         del img_mlp_in
-        
+
         img.add_(apply_mod(img_mlp_out, img_mod2.gate, None, modulation_dims_img))
         del img_mlp_out
 
@@ -230,13 +230,13 @@ class NAGKleinDoubleStreamBlock:
             txt_proj_pos = self.txt_attn.proj(txt_attn_pos)
             txt_proj_neg = self.txt_attn.proj(txt_attn_neg)
             del txt_attn_pos, txt_attn_neg
-            
+
             # Apply to positive part (first img_bsz batches)
             txt_update_pos = apply_mod(txt_proj_pos, txt_mod1.gate[:-origin_bsz], None, modulation_dims_txt)
             del txt_proj_pos
             txt[:-origin_bsz, context_pad_len:].add_(txt_update_pos)
             del txt_update_pos
-            
+
             # Apply to negative part (last origin_bsz batches)
             txt_update_neg = apply_mod(txt_proj_neg, txt_mod1.gate[-origin_bsz:], None, modulation_dims_txt)
             del txt_proj_neg
@@ -252,7 +252,7 @@ class NAGKleinDoubleStreamBlock:
         txt_mlp_in = apply_mod(self.txt_norm2(txt), (1 + txt_mod2.scale), txt_mod2.shift, modulation_dims_txt)
         txt_mlp_out = self.txt_mlp(txt_mlp_in)
         del txt_mlp_in
-        
+
         txt.add_(apply_mod(txt_mlp_out, txt_mod2.gate, None, modulation_dims_txt))
         del txt_mlp_out
 
@@ -301,7 +301,7 @@ class NAGKleinSingleStreamBlock:
         # Calculate batch sizes if origin_bsz not provided
         if origin_bsz is None:
             origin_bsz = 0
-            
+
         total_bsz = x.shape[0]
         pos_bsz = total_bsz - origin_bsz if origin_bsz > 0 else total_bsz
 
@@ -309,10 +309,10 @@ class NAGKleinSingleStreamBlock:
         x_normed = self.pre_norm(x)
         x_modulated = apply_mod(x_normed, (1 + mod.scale), mod.shift, modulation_dims)
         del x_normed
-        
+
         qkv, mlp = torch.split(
-            self.linear1(x_modulated), 
-            [3 * self.hidden_size, self.mlp_hidden_dim_first], 
+            self.linear1(x_modulated),
+            [3 * self.hidden_size, self.mlp_hidden_dim_first],
             dim=-1
         )
         del x_modulated
@@ -332,7 +332,7 @@ class NAGKleinSingleStreamBlock:
                 k_negative = k[-origin_bsz:, :, nag_pad_len:]
                 v_positive = v[:-origin_bsz, :, context_pad_len:]
                 v_negative = v[-origin_bsz:, :, nag_pad_len:]
-                
+
                 mlp_positive = mlp[:-origin_bsz, context_pad_len:]
                 mlp_negative = mlp[-origin_bsz:, nag_pad_len:]
             else:
@@ -343,7 +343,7 @@ class NAGKleinSingleStreamBlock:
                 k_negative = torch.cat([k[-origin_bsz:, :, :img_length], k[-origin_bsz:, :, img_length + nag_pad_len:]], dim=2)
                 v_positive = torch.cat([v[:-origin_bsz, :, :img_length], v[:-origin_bsz, :, img_length + context_pad_len:]], dim=2)
                 v_negative = torch.cat([v[-origin_bsz:, :, :img_length], v[-origin_bsz:, :, img_length + nag_pad_len:]], dim=2)
-                
+
                 mlp_positive = torch.cat([mlp[:-origin_bsz, :img_length], mlp[:-origin_bsz, img_length + context_pad_len:]], dim=1)
                 mlp_negative = torch.cat([mlp[-origin_bsz:, :img_length], mlp[-origin_bsz:, img_length + nag_pad_len:]], dim=1)
 
@@ -352,7 +352,7 @@ class NAGKleinSingleStreamBlock:
             # Compute attention - sequential to reduce peak memory
             attn_positive = attention(q_positive, k_positive, v_positive, pe=pe, mask=attn_mask, transformer_options=transformer_options)
             del q_positive, k_positive, v_positive
-            
+
             attn_negative = attention(q_negative, k_negative, v_negative, pe=pe_negative, mask=attn_mask, transformer_options=transformer_options)
             del q_negative, k_negative, v_negative
 
@@ -375,22 +375,22 @@ class NAGKleinSingleStreamBlock:
             # Apply NAG only to image attention
             pos_img_bsz = img_attn_positive.shape[0]
             neg_img_bsz = img_attn_negative.shape[0]
-            
+
             if pos_img_bsz == neg_img_bsz:
                 img_attn_guided = nag(
                     img_attn_positive,
-                    img_attn_negative, 
-                    self.nag_scale, 
-                    self.nag_tau, 
+                    img_attn_negative,
+                    self.nag_scale,
+                    self.nag_tau,
                     self.nag_alpha
                 )
             elif neg_img_bsz < pos_img_bsz:
                 # Apply NAG only to the last neg_img_bsz batches
                 img_attn_guided_part = nag(
                     img_attn_positive[-neg_img_bsz:],
-                    img_attn_negative, 
-                    self.nag_scale, 
-                    self.nag_tau, 
+                    img_attn_negative,
+                    self.nag_scale,
+                    self.nag_tau,
                     self.nag_alpha
                 )
                 img_attn_guided = torch.cat([img_attn_positive[:-neg_img_bsz], img_attn_guided_part], dim=0)
@@ -398,16 +398,16 @@ class NAGKleinSingleStreamBlock:
             else:
                 # neg_img_bsz > pos_img_bsz - expand positive
                 repeat_times = (neg_img_bsz + pos_img_bsz - 1) // pos_img_bsz
-                img_attn_pos_expanded = img_attn_positive.repeat(repeat_times, 1, 1)[-neg_img_bsz:]
+                img_attn_pos_expanded = img_attn_positive.expand(neg_img_bsz, -1, -1) if pos_img_bsz == 1 else img_attn_positive.repeat(repeat_times, 1, 1)[-neg_img_bsz:]
                 img_attn_guided = nag(
                     img_attn_pos_expanded,
-                    img_attn_negative, 
-                    self.nag_scale, 
-                    self.nag_tau, 
+                    img_attn_negative,
+                    self.nag_scale,
+                    self.nag_tau,
                     self.nag_alpha
                 )[:pos_img_bsz]
                 del img_attn_pos_expanded
-                
+
             del img_attn_positive, img_attn_negative
 
             # Reconstruct with guided image attention
@@ -422,7 +422,7 @@ class NAGKleinSingleStreamBlock:
                         attn_out_negative = torch.cat([txt_attn_negative, img_attn_guided[-txt_attn_negative.shape[0]:]], dim=1)
                     else:
                         repeat_times = (txt_attn_negative.shape[0] + img_attn_guided.shape[0] - 1) // img_attn_guided.shape[0]
-                        img_guided_expanded = img_attn_guided.repeat(repeat_times, 1, 1)[:txt_attn_negative.shape[0]]
+                        img_guided_expanded = img_attn_guided.expand(txt_attn_negative.shape[0], -1, -1) if img_attn_guided.shape[0] == 1 else img_attn_guided.repeat(repeat_times, 1, 1)[:txt_attn_negative.shape[0]]
                         attn_out_negative = torch.cat([txt_attn_negative, img_guided_expanded], dim=1)
             else:
                 attn_out_positive = torch.cat([img_attn_guided, txt_attn_positive], dim=1)
@@ -433,7 +433,7 @@ class NAGKleinSingleStreamBlock:
                         attn_out_negative = torch.cat([img_attn_guided[-txt_attn_negative.shape[0]:], txt_attn_negative], dim=1)
                     else:
                         repeat_times = (txt_attn_negative.shape[0] + img_attn_guided.shape[0] - 1) // img_attn_guided.shape[0]
-                        img_guided_expanded = img_attn_guided.repeat(repeat_times, 1, 1)[:txt_attn_negative.shape[0]]
+                        img_guided_expanded = img_attn_guided.expand(txt_attn_negative.shape[0], -1, -1) if img_attn_guided.shape[0] == 1 else img_attn_guided.repeat(repeat_times, 1, 1)[:txt_attn_negative.shape[0]]
                         attn_out_negative = torch.cat([img_guided_expanded, txt_attn_negative], dim=1)
 
             del txt_attn_positive, txt_attn_negative, img_attn_guided
@@ -453,7 +453,7 @@ class NAGKleinSingleStreamBlock:
             del attn_out_positive, mlp_out_positive
             output_positive = self.linear2(combined_pos)
             del combined_pos
-            
+
             combined_neg = torch.cat((attn_out_negative, mlp_out_negative), dim=2)
             del attn_out_negative, mlp_out_negative
             output_negative = self.linear2(combined_neg)
@@ -465,7 +465,7 @@ class NAGKleinSingleStreamBlock:
                 del output_positive
                 x[:-origin_bsz, context_pad_len:].add_(update_pos)
                 del update_pos
-                
+
                 update_neg = apply_mod(output_negative, mod.gate[-origin_bsz:], None, modulation_dims)
                 del output_negative
                 x[-origin_bsz:, nag_pad_len:].add_(update_neg)
@@ -473,19 +473,19 @@ class NAGKleinSingleStreamBlock:
             else:
                 gate_pos = mod.gate[:-origin_bsz]
                 gate_neg = mod.gate[-origin_bsz:]
-                
+
                 update_pos_img = apply_mod(output_positive[:, :img_length], gate_pos, None, modulation_dims)
                 update_pos_txt = apply_mod(output_positive[:, img_length:], gate_pos, None, modulation_dims)
                 del output_positive
-                
+
                 x[:-origin_bsz, :img_length].add_(update_pos_img)
                 x[:-origin_bsz, img_length + context_pad_len:].add_(update_pos_txt)
                 del update_pos_img, update_pos_txt
-                
+
                 update_neg_img = apply_mod(output_negative[:, :img_length], gate_neg, None, modulation_dims)
                 update_neg_txt = apply_mod(output_negative[:, img_length:], gate_neg, None, modulation_dims)
                 del output_negative
-                
+
                 x[-origin_bsz:, :img_length].add_(update_neg_img)
                 x[-origin_bsz:, img_length + nag_pad_len:].add_(update_neg_txt)
                 del update_neg_img, update_neg_txt
@@ -498,18 +498,18 @@ class NAGKleinSingleStreamBlock:
             qkv, mlp = torch.split(self.linear1(x_modulated), [3 * self.hidden_size, self.mlp_hidden_dim_first], dim=-1)
             q, k, v = qkv.view(qkv.shape[0], qkv.shape[1], 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
             q, k = self.norm(q, k, v)
-            
+
             attn = attention(q, k, v, pe=pe, mask=attn_mask, transformer_options=transformer_options)
-            
+
             if hasattr(self, 'yak_mlp') and self.yak_mlp:
                 mlp_out = self.mlp_act(mlp[..., self.mlp_hidden_dim_first // 2:]) * mlp[..., :self.mlp_hidden_dim_first // 2]
             else:
                 mlp_out = self.mlp_act(mlp)
-            
+
             output = self.linear2(torch.cat((attn, mlp_out), dim=2))
             x.add_(apply_mod(output, mod.gate, None, modulation_dims))
 
         if x.dtype == torch.float16:
             x = torch.nan_to_num(x, nan=0.0, posinf=65504, neginf=-65504)
-        
+
         return x

@@ -19,7 +19,7 @@ class NAGKlein(Flux):
     """
     NAG-enabled Klein model.
     """
-    
+
     def forward_orig_klein(
             self,
             img: Tensor,
@@ -41,29 +41,29 @@ class NAGKlein(Flux):
         """
         patches = transformer_options.get("patches", {})
         patches_replace = transformer_options.get("patches_replace", {})
-        
+
         if img.ndim != 3 or txt.ndim != 3:
             raise ValueError("Input img and txt tensors must have 3 dimensions.")
 
         img_bsz = img.shape[0]
         txt_bsz = txt.shape[0]
         origin_bsz = txt_bsz - img_bsz
-        
+
         # Process inputs
         img = self.img_in(img)
         vec = self.time_in(timestep_embedding(timesteps, 256).to(img.dtype))
-        
+
         if self.params.guidance_embed and guidance is not None:
             vec.add_(self.guidance_in(timestep_embedding(guidance, 256).to(img.dtype)))
 
         vec_extended = torch.cat((vec, vec[-origin_bsz:]), dim=0)
-        
+
         if hasattr(self, 'vector_in') and self.vector_in is not None:
             if y is None:
                 y = torch.zeros((img_bsz, self.params.vec_in_dim), device=img.device, dtype=img.dtype)
             y_extended = torch.cat((y, y[-origin_bsz:]), dim=0)
             vec_extended.add_(self.vector_in(y_extended[:, :self.params.vec_in_dim]))
-        
+
         if hasattr(self, 'txt_norm') and self.txt_norm is not None:
             txt = self.txt_norm(txt)
         txt = self.txt_in(txt)
@@ -79,22 +79,22 @@ class NAGKlein(Flux):
             pe_negative = None
 
         vec_orig = vec_extended
-        
+
         # Compute global modulation for double blocks
         # Returns tuple of (ModulationOut, ModulationOut) for attn and mlp paths
         img_mod = self.double_stream_modulation_img(vec_extended[:-origin_bsz] if origin_bsz > 0 else vec_extended)
         txt_mod = self.double_stream_modulation_txt(vec_extended)
-        
+
         vec_double = (img_mod, txt_mod)
-        
+
         blocks_replace = patches_replace.get("dit", {})
         transformer_options["total_blocks"] = len(self.double_blocks)
         transformer_options["block_type"] = "double"
-        
+
         # Double blocks
         for i, block in enumerate(self.double_blocks):
             transformer_options["block_index"] = i
-            
+
             if ("double_block", i) in blocks_replace:
                 def block_wrap(args):
                     out = {}
@@ -160,11 +160,11 @@ class NAGKlein(Flux):
 
         transformer_options["total_blocks"] = len(self.single_blocks)
         transformer_options["block_type"] = "single"
-        
+
         # Single blocks
         for i, block in enumerate(self.single_blocks):
             transformer_options["block_index"] = i
-            
+
             if ("single_block", i) in blocks_replace:
                 def block_wrap(args):
                     out = {}
@@ -223,9 +223,9 @@ class NAGKlein(Flux):
             x = x[:-origin_bsz]
         x = x[:, txt.shape[1]:, ...]
         x = self.final_layer(x, vec_orig[:-origin_bsz] if origin_bsz > 0 else vec_orig)
-        
+
         return x
-    
+
     def forward(
             self,
             x,
@@ -250,17 +250,17 @@ class NAGKlein(Flux):
 
         h_len = ((h_orig + (patch_size // 2)) // patch_size)
         w_len = ((w_orig + (patch_size // 2)) // patch_size)
-        
+
         img, img_ids = self.process_img(x, transformer_options=transformer_options)
         img_tokens = img.shape[1]
-        
+
         # Handle reference latents
         if ref_latents is not None:
             h = 0
             w = 0
             index = 0
             ref_latents_method = kwargs.get("ref_latents_method", getattr(self.params, 'default_ref_method', 'index'))
-            
+
             for ref in ref_latents:
                 if ref_latents_method == "index":
                     index += getattr(self.params, 'ref_index_scale', 1)
@@ -288,7 +288,7 @@ class NAGKlein(Flux):
                 img_ids = torch.cat([img_ids, kontext_ids], dim=1)
 
         apply_nag = check_nag_activation(transformer_options, nag_sigma_start, nag_sigma_end)
-        
+
         if apply_nag and nag_negative_context is not None:
             pos_bsz = x.shape[0]
             nag_bsz = nag_negative_context.shape[0]
@@ -303,7 +303,7 @@ class NAGKlein(Flux):
                     if isinstance(v, torch.Tensor) and v.ndim > 0 and v.shape[0] == pos_bsz:
                         if nag_bsz > pos_bsz:
                             repeat_times = (nag_bsz + pos_bsz - 1) // pos_bsz
-                            v_neg = v.repeat(repeat_times, *[1]*(v.ndim-1))[:nag_bsz]
+                            v_neg = v.expand(nag_bsz, *[-1]*(v.ndim-1)) if pos_bsz == 1 else v.repeat(repeat_times, *[1]*(v.ndim-1))[:nag_bsz]
                         else:
                             v_neg = v[:nag_bsz]
                         new_d[k] = torch.cat([v, v_neg], dim=0)
@@ -317,13 +317,13 @@ class NAGKlein(Flux):
 
             transformer_options = expand_tensors_in_dict(transformer_options, is_root=True)
             kwargs = expand_tensors_in_dict(kwargs, is_root=True)
-            
+
             origin_context_len = context.shape[1]
             nag_bsz = nag_negative_context.shape[0]
             nag_negative_context_len = nag_negative_context.shape[1]
-            
+
             context = cat_context(context, nag_negative_context, trim_context=True)
-            
+
             context_pad_len = context.shape[1] - origin_context_len
             nag_pad_len = context.shape[1] - nag_negative_context_len
 
@@ -359,31 +359,31 @@ class NAGKlein(Flux):
                     )
 
                 txt_ids = torch.zeros(
-                    (bs, origin_context_len, len(self.params.axes_dim)), 
-                    device=x.device, 
+                    (bs, origin_context_len, len(self.params.axes_dim)),
+                    device=x.device,
                     dtype=torch.float32
                 )
                 txt_ids_negative = torch.zeros(
-                    (nag_bsz, nag_negative_context_len, len(self.params.axes_dim)), 
-                    device=x.device, 
+                    (nag_bsz, nag_negative_context_len, len(self.params.axes_dim)),
+                    device=x.device,
                     dtype=torch.float32
                 )
-                
+
                 if hasattr(self.params, 'txt_ids_dims') and len(self.params.txt_ids_dims) > 0:
                     for i in self.params.txt_ids_dims:
                         txt_ids[:, :, i] = torch.linspace(
-                            0, origin_context_len - 1, 
-                            steps=origin_context_len, 
-                            device=x.device, 
+                            0, origin_context_len - 1,
+                            steps=origin_context_len,
+                            device=x.device,
                             dtype=torch.float32
                         )
                         txt_ids_negative[:, :, i] = torch.linspace(
-                            0, nag_negative_context_len - 1, 
-                            steps=nag_negative_context_len, 
-                            device=x.device, 
+                            0, nag_negative_context_len - 1,
+                            steps=nag_negative_context_len,
+                            device=x.device,
                             dtype=torch.float32
                         )
-                
+
                 out = self.forward_orig(
                     img=img,
                     img_ids=img_ids,
@@ -399,62 +399,62 @@ class NAGKlein(Flux):
                     context_pad_len=context_pad_len,
                     nag_pad_len=nag_pad_len,
                 )
-                
+
             finally:
                 if forward_orig_ is not None:
                     self.forward_orig = forward_orig_
                 elif hasattr(self, 'forward_orig'):
                     delattr(self, 'forward_orig')
-                    
+
                 for i, block in enumerate(self.double_blocks):
                     if i < len(double_blocks_forward):
                         block.forward = double_blocks_forward[i]
-                        
+
                 for i, block in enumerate(self.single_blocks):
                     if i < len(single_blocks_forward):
                         block.forward = single_blocks_forward[i]
 
         else:
             txt_ids = torch.zeros(
-                (bs, context.shape[1], len(self.params.axes_dim)), 
-                device=x.device, 
+                (bs, context.shape[1], len(self.params.axes_dim)),
+                device=x.device,
                 dtype=torch.float32
             )
-            
+
             if hasattr(self.params, 'txt_ids_dims') and len(self.params.txt_ids_dims) > 0:
                 for i in self.params.txt_ids_dims:
                     txt_ids[:, :, i] = torch.linspace(
-                        0, context.shape[1] - 1, 
-                        steps=context.shape[1], 
-                        device=x.device, 
+                        0, context.shape[1] - 1,
+                        steps=context.shape[1],
+                        device=x.device,
                         dtype=torch.float32
                     )
-            
+
             sig = inspect.signature(Flux.forward_orig)
             pass_kwargs = {}
             if "attn_mask" in sig.parameters:
                 pass_kwargs["attn_mask"] = kwargs.get("attention_mask", None)
             if "timestep_zero_index" in sig.parameters:
                 pass_kwargs["timestep_zero_index"] = kwargs.get("timestep_zero_index", None)
-            
+
             out = Flux.forward_orig(
-                self, 
-                img=img, 
-                img_ids=img_ids, 
-                txt=context, 
-                txt_ids=txt_ids, 
-                timesteps=timestep, 
-                y=y, 
-                guidance=guidance, 
-                control=control, 
+                self,
+                img=img,
+                img_ids=img_ids,
+                txt=context,
+                txt_ids=txt_ids,
+                timesteps=timestep,
+                y=y,
+                guidance=guidance,
+                control=control,
                 transformer_options=transformer_options,
                 **pass_kwargs
             )
 
         out = out[:, :img_tokens]
         return rearrange(
-            out, 
-            "b (h w) (c ph pw) -> b c (h ph) (w pw)", 
+            out,
+            "b (h w) (c ph pw) -> b c (h ph) (w pw)",
             h=h_len, w=w_len, ph=self.patch_size, pw=self.patch_size
         )[:, :, :h_orig, :w_orig]
 
@@ -468,19 +468,19 @@ class NAGKleinSwitch(NAGSwitch):
             partial(
                 NAGKlein.forward,
                 nag_negative_context=self.nag_negative_cond[0][0],
-                nag_negative_y=self.nag_negative_cond[0][1].get("pooled_output") 
+                nag_negative_y=self.nag_negative_cond[0][1].get("pooled_output")
                     if self.nag_negative_cond[0][1].get("pooled_output") is not None else None,
                 nag_sigma_start=self.nag_sigma_start,
                 nag_sigma_end=self.nag_sigma_end,
             ),
             self.model,
         )
-        
+
         for block in self.model.double_blocks:
             block.nag_scale = self.nag_scale
             block.nag_tau = self.nag_tau
             block.nag_alpha = self.nag_alpha
-            
+
         for block in self.model.single_blocks:
             block.nag_scale = self.nag_scale
             block.nag_tau = self.nag_tau
