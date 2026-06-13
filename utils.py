@@ -6,27 +6,39 @@ def nag(z_positive, z_negative, scale, tau, alpha):
     m = min(z_positive.shape[0], z_negative.shape[0])
     if m == 0:
         return z_negative
-    z_positive = z_positive[-m:]
-    z_negative = z_negative[-m:]
-    z_guidance = z_positive * scale - z_negative * (scale - 1)
-
+        
+    z_pos_slice = z_positive[-m:]
+    z_neg_slice = z_negative[-m:]
+    
+    # 1. Allocate the guidance tensor ONCE
+    z_guidance = torch.empty_like(z_pos_slice)
+    z_guidance.copy_(z_pos_slice)
+    
+    # 2. In-place math for extrapolation: z_guidance = z_pos * scale - z_neg * (scale - 1)
+    z_guidance.mul_(scale)
+    z_guidance.sub_(z_neg_slice, alpha=(scale - 1))
+    
     eps = 1e-6
-    norm_positive = (
-        torch.norm(z_positive, p=1, dim=-1, keepdim=True)
-        .clamp_min(eps)
-        .expand_as(z_positive)
-    )
-    norm_guidance = (
-        torch.norm(z_guidance, p=1, dim=-1, keepdim=True)
-        .clamp_min(eps)
-        .expand_as(z_guidance)
-    )
-
-    s = norm_guidance / norm_positive
-    z_guidance = z_guidance * torch.minimum(s, s.new_full((1,), tau)) / s
-
-    z_guidance = z_guidance * alpha + z_positive * (1 - alpha)
-
+    
+    # 3. Calculate norms WITHOUT .expand_as() 
+    # We leave these as smaller broadcastable shapes, saving massive amounts of VRAM
+    norm_positive = torch.norm(z_pos_slice, p=1, dim=-1, keepdim=True).clamp_min_(eps)
+    norm_guidance = torch.norm(z_guidance, p=1, dim=-1, keepdim=True).clamp_min_(eps)
+    
+    # 4. In-place calculation for s
+    s = norm_guidance.div_(norm_positive)
+    
+    # 5. In-place clamping logic
+    tau_tensor = torch.full((1,), tau, dtype=s.dtype, device=s.device)
+    clamp_factor = torch.minimum(s, tau_tensor).div_(s)
+    
+    # 6. Apply the clamp to the guidance tensor in-place
+    z_guidance.mul_(clamp_factor)
+    
+    # 7. Final blend in-place: z_guidance * alpha + z_pos * (1 - alpha)
+    z_guidance.mul_(alpha)
+    z_guidance.add_(z_pos_slice, alpha=(1 - alpha))
+    
     return z_guidance
 
 
