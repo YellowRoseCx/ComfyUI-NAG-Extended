@@ -51,21 +51,21 @@ def cat_context(context, nag_negative_context, trim_context=False, dim=1):
 
     if context_len < nag_neg_context_len:
         if dim == 1:
-            context = context.repeat(1, math.ceil(nag_neg_context_len / context_len), 1)
+            context = context.expand(-1, nag_neg_context_len, -1) if context_len == 1 else context.repeat(1, math.ceil(nag_neg_context_len / context_len), 1)
             if trim_context:
                 context = context[:, -nag_neg_context_len:]
         else:
-            context = context.repeat(1, 1, math.ceil(nag_neg_context_len / context_len), 1)
+            context = context.expand(-1, -1, nag_neg_context_len, -1) if context_len == 1 else context.repeat(1, 1, math.ceil(nag_neg_context_len / context_len), 1)
             if trim_context:
                 context = context[:, :, -nag_neg_context_len:]
 
         context_len = context.shape[dim]
 
     if dim == 1:
-        nag_negative_context = nag_negative_context.repeat(1, math.ceil(context_len / nag_neg_context_len), 1)
+        nag_negative_context = nag_negative_context.expand(-1, context_len, -1) if nag_neg_context_len == 1 else nag_negative_context.repeat(1, math.ceil(context_len / nag_neg_context_len), 1)
         nag_negative_context = nag_negative_context[:, -context_len:]
     else:
-        nag_negative_context = nag_negative_context.repeat(1, 1, math.ceil(context_len / nag_neg_context_len), 1)
+        nag_negative_context = nag_negative_context.expand(-1, -1, context_len, -1) if nag_neg_context_len == 1 else nag_negative_context.repeat(1, 1, math.ceil(context_len / nag_neg_context_len), 1)
         nag_negative_context = nag_negative_context[:, :, -context_len:]
 
 
