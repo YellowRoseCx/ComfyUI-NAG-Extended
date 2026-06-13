@@ -215,14 +215,14 @@ class NAGKleinDoubleStreamBlock:
         img_proj = self.img_attn.proj(img_attn_guided)
         del img_attn_guided
         
-        img = img + apply_mod(img_proj, img_mod1.gate, None, modulation_dims_img)
+        img.add_(apply_mod(img_proj, img_mod1.gate, None, modulation_dims_img))
         del img_proj
         
         img_mlp_in = apply_mod(self.img_norm2(img), (1 + img_mod2.scale), img_mod2.shift, modulation_dims_img)
         img_mlp_out = self.img_mlp(img_mlp_in)
         del img_mlp_in
         
-        img = img + apply_mod(img_mlp_out, img_mod2.gate, None, modulation_dims_img)
+        img.add_(apply_mod(img_mlp_out, img_mod2.gate, None, modulation_dims_img))
         del img_mlp_out
 
         # ===== Calculate txt blocks =====
@@ -234,18 +234,18 @@ class NAGKleinDoubleStreamBlock:
             # Apply to positive part (first img_bsz batches)
             txt_update_pos = apply_mod(txt_proj_pos, txt_mod1.gate[:-origin_bsz], None, modulation_dims_txt)
             del txt_proj_pos
-            txt[:-origin_bsz, context_pad_len:] = txt[:-origin_bsz, context_pad_len:] + txt_update_pos
+            txt[:-origin_bsz, context_pad_len:].add_(txt_update_pos)
             del txt_update_pos
             
             # Apply to negative part (last origin_bsz batches)
             txt_update_neg = apply_mod(txt_proj_neg, txt_mod1.gate[-origin_bsz:], None, modulation_dims_txt)
             del txt_proj_neg
-            txt[-origin_bsz:, nag_pad_len:] = txt[-origin_bsz:, nag_pad_len:] + txt_update_neg
+            txt[-origin_bsz:, nag_pad_len:].add_(txt_update_neg)
             del txt_update_neg
         else:
             txt_proj = self.txt_attn.proj(txt_attn_pos)
             del txt_attn_pos
-            txt = txt + apply_mod(txt_proj, txt_mod1.gate, None, modulation_dims_txt)
+            txt.add_(apply_mod(txt_proj, txt_mod1.gate, None, modulation_dims_txt))
             del txt_proj
 
         # MLP
@@ -253,7 +253,7 @@ class NAGKleinDoubleStreamBlock:
         txt_mlp_out = self.txt_mlp(txt_mlp_in)
         del txt_mlp_in
         
-        txt = txt + apply_mod(txt_mlp_out, txt_mod2.gate, None, modulation_dims_txt)
+        txt.add_(apply_mod(txt_mlp_out, txt_mod2.gate, None, modulation_dims_txt))
         del txt_mlp_out
 
         if txt.dtype == torch.float16:
@@ -463,12 +463,12 @@ class NAGKleinSingleStreamBlock:
             if txt_length is not None:
                 update_pos = apply_mod(output_positive, mod.gate[:-origin_bsz], None, modulation_dims)
                 del output_positive
-                x[:-origin_bsz, context_pad_len:] = x[:-origin_bsz, context_pad_len:] + update_pos
+                x[:-origin_bsz, context_pad_len:].add_(update_pos)
                 del update_pos
                 
                 update_neg = apply_mod(output_negative, mod.gate[-origin_bsz:], None, modulation_dims)
                 del output_negative
-                x[-origin_bsz:, nag_pad_len:] = x[-origin_bsz:, nag_pad_len:] + update_neg
+                x[-origin_bsz:, nag_pad_len:].add_(update_neg)
                 del update_neg
             else:
                 gate_pos = mod.gate[:-origin_bsz]
@@ -478,16 +478,16 @@ class NAGKleinSingleStreamBlock:
                 update_pos_txt = apply_mod(output_positive[:, img_length:], gate_pos, None, modulation_dims)
                 del output_positive
                 
-                x[:-origin_bsz, :img_length] = x[:-origin_bsz, :img_length] + update_pos_img
-                x[:-origin_bsz, img_length + context_pad_len:] = x[:-origin_bsz, img_length + context_pad_len:] + update_pos_txt
+                x[:-origin_bsz, :img_length].add_(update_pos_img)
+                x[:-origin_bsz, img_length + context_pad_len:].add_(update_pos_txt)
                 del update_pos_img, update_pos_txt
                 
                 update_neg_img = apply_mod(output_negative[:, :img_length], gate_neg, None, modulation_dims)
                 update_neg_txt = apply_mod(output_negative[:, img_length:], gate_neg, None, modulation_dims)
                 del output_negative
                 
-                x[-origin_bsz:, :img_length] = x[-origin_bsz:, :img_length] + update_neg_img
-                x[-origin_bsz:, img_length + nag_pad_len:] = x[-origin_bsz:, img_length + nag_pad_len:] + update_neg_txt
+                x[-origin_bsz:, :img_length].add_(update_neg_img)
+                x[-origin_bsz:, img_length + nag_pad_len:].add_(update_neg_txt)
                 del update_neg_img, update_neg_txt
         else:
             # No NAG, standard forward
@@ -507,7 +507,7 @@ class NAGKleinSingleStreamBlock:
                 mlp_out = self.mlp_act(mlp)
             
             output = self.linear2(torch.cat((attn, mlp_out), dim=2))
-            x = x + apply_mod(output, mod.gate, None, modulation_dims)
+            x.add_(apply_mod(output, mod.gate, None, modulation_dims))
 
         if x.dtype == torch.float16:
             x = torch.nan_to_num(x, nan=0.0, posinf=65504, neginf=-65504)
