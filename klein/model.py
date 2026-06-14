@@ -54,7 +54,7 @@ class NAGKlein(Flux):
         vec = self.time_in(timestep_embedding(timesteps, 256).to(img.dtype))
 
         if self.params.guidance_embed and guidance is not None:
-            vec.add_(self.guidance_in(timestep_embedding(guidance, 256).to(img.dtype)))
+            vec = vec + self.guidance_in(timestep_embedding(guidance, 256).to(img.dtype))
 
         vec_extended = torch.cat((vec, vec[-origin_bsz:]), dim=0)
 
@@ -62,7 +62,7 @@ class NAGKlein(Flux):
             if y is None:
                 y = torch.zeros((img_bsz, self.params.vec_in_dim), device=img.device, dtype=img.dtype)
             y_extended = torch.cat((y, y[-origin_bsz:]), dim=0)
-            vec_extended.add_(self.vector_in(y_extended[:, :self.params.vec_in_dim]))
+            vec_extended = vec_extended + self.vector_in(y_extended[:, :self.params.vec_in_dim])
 
         if hasattr(self, 'txt_norm') and self.txt_norm is not None:
             txt = self.txt_norm(txt)
@@ -145,7 +145,7 @@ class NAGKlein(Flux):
                 if control_i is not None and i < len(control_i):
                     add = control_i[i]
                     if add is not None:
-                        img[:, :add.shape[1]].add_(add)
+                        img[:, :add.shape[1]] += add
 
         if img.dtype == torch.float16:
             img = torch.nan_to_num(img, nan=0.0, posinf=65504, neginf=-65504)
@@ -217,7 +217,7 @@ class NAGKlein(Flux):
                 if control_o is not None and i < len(control_o):
                     add = control_o[i]
                     if add is not None:
-                        x[:, txt.shape[1]:txt.shape[1] + add.shape[1], ...].add_(add)
+                        x[:, txt.shape[1]:txt.shape[1] + add.shape[1], ...] += add
 
         if origin_bsz > 0:
             x = x[:-origin_bsz]
@@ -303,7 +303,7 @@ class NAGKlein(Flux):
                     if isinstance(v, torch.Tensor) and v.ndim > 0 and v.shape[0] == pos_bsz:
                         if nag_bsz > pos_bsz:
                             repeat_times = (nag_bsz + pos_bsz - 1) // pos_bsz
-                            v_neg = v.expand(nag_bsz, *[-1]*(v.ndim-1)) if pos_bsz == 1 else v.repeat(repeat_times, *[1]*(v.ndim-1))[:nag_bsz]
+                            v_neg = v.repeat(repeat_times, *[1]*(v.ndim-1))[:nag_bsz]
                         else:
                             v_neg = v[:nag_bsz]
                         new_d[k] = torch.cat([v, v_neg], dim=0)

@@ -9,6 +9,27 @@ from comfy.ldm.flux.layers import apply_mod
 
 from ..utils import nag
 
+def batched_attention(q, k, v, pe, mask, transformer_options):
+    bsz = q.shape[0]
+    if bsz == 1:
+        return attention(q, k, v, pe=pe, mask=mask, transformer_options=transformer_options)
+
+    out = []
+    for b in range(bsz):
+        # Slice q, k, v. Note: pe might be batched or unbatched.
+        q_b = q[b:b+1]
+        k_b = k[b:b+1]
+        v_b = v[b:b+1]
+
+        pe_b = pe[b:b+1] if pe is not None and pe.ndim >= 4 and pe.shape[0] == bsz else pe
+        mask_b = mask[b:b+1] if mask is not None and mask.shape[0] == bsz else mask
+
+        out.append(attention(q_b, k_b, v_b, pe=pe_b, mask=mask_b, transformer_options=transformer_options))
+
+    return torch.cat(out, dim=0)
+
+
+
 
 class NAGKleinDoubleStreamBlock:
     """
@@ -88,9 +109,9 @@ class NAGKleinDoubleStreamBlock:
             else:
                 # Need to expand img to match origin_bsz (edge case)
                 repeat_times = (origin_bsz + img_bsz - 1) // img_bsz
-                img_q_neg = img_q.expand(origin_bsz, -1, -1, -1) if img_bsz == 1 else img_q.repeat(repeat_times, 1, 1, 1)[-origin_bsz:]
-                img_k_neg = img_k.expand(origin_bsz, -1, -1, -1) if img_bsz == 1 else img_k.repeat(repeat_times, 1, 1, 1)[-origin_bsz:]
-                img_v_neg = img_v.expand(origin_bsz, -1, -1, -1) if img_bsz == 1 else img_v.repeat(repeat_times, 1, 1, 1)[-origin_bsz:]
+                img_q_neg = img_q.repeat(repeat_times, 1, 1, 1)[-origin_bsz:]
+                img_k_neg = img_k.repeat(repeat_times, 1, 1, 1)[-origin_bsz:]
+                img_v_neg = img_v.repeat(repeat_times, 1, 1, 1)[-origin_bsz:]
         else:
             # No negative path
             txt_q_positive = txt_q[:, :, context_pad_len:]
@@ -115,7 +136,7 @@ class NAGKleinDoubleStreamBlock:
 
         del txt_q_positive, txt_k_positive, txt_v_positive
 
-        attn_pos = attention(q_pos, k_pos, v_pos, pe=pe, mask=attn_mask, transformer_options=transformer_options)
+        attn_pos = batched_attention(q_pos, k_pos, v_pos, pe, attn_mask, transformer_options)
         del q_pos, k_pos, v_pos
 
         # ===== Run attention for negative path (if exists) =====
@@ -132,7 +153,7 @@ class NAGKleinDoubleStreamBlock:
             del txt_q_negative, txt_k_negative, txt_v_negative
             del img_q_neg, img_k_neg, img_v_neg
 
-            attn_neg = attention(q_neg, k_neg, v_neg, pe=pe_negative, mask=attn_mask, transformer_options=transformer_options)
+            attn_neg = batched_attention(q_neg, k_neg, v_neg, pe_negative, attn_mask, transformer_options)
             del q_neg, k_neg, v_neg
         else:
             attn_neg = None
@@ -193,7 +214,7 @@ class NAGKleinDoubleStreamBlock:
             else:
                 # origin_bsz > img_bsz - expand img_attn_pos to match
                 repeat_times = (origin_bsz + img_bsz - 1) // img_bsz
-                img_attn_pos_expanded = img_attn_pos.expand(origin_bsz, -1, -1) if img_bsz == 1 else img_attn_pos.repeat(repeat_times, 1, 1)[-origin_bsz:]
+                img_attn_pos_expanded = img_attn_pos.repeat(repeat_times, 1, 1)[-origin_bsz:]
                 img_attn_guided = nag(
                     img_attn_pos_expanded,
                     img_attn_neg,
@@ -215,14 +236,14 @@ class NAGKleinDoubleStreamBlock:
         img_proj = self.img_attn.proj(img_attn_guided)
         del img_attn_guided
 
-        img.add_(apply_mod(img_proj, img_mod1.gate, None, modulation_dims_img))
+        img = img + apply_mod(img_proj, img_mod1.gate, None, modulation_dims_img)
         del img_proj
 
         img_mlp_in = apply_mod(self.img_norm2(img), (1 + img_mod2.scale), img_mod2.shift, modulation_dims_img)
         img_mlp_out = self.img_mlp(img_mlp_in)
         del img_mlp_in
 
-        img.add_(apply_mod(img_mlp_out, img_mod2.gate, None, modulation_dims_img))
+        img = img + apply_mod(img_mlp_out, img_mod2.gate, None, modulation_dims_img)
         del img_mlp_out
 
         # ===== Calculate txt blocks =====
@@ -234,18 +255,18 @@ class NAGKleinDoubleStreamBlock:
             # Apply to positive part (first img_bsz batches)
             txt_update_pos = apply_mod(txt_proj_pos, txt_mod1.gate[:-origin_bsz], None, modulation_dims_txt)
             del txt_proj_pos
-            txt[:-origin_bsz, context_pad_len:].add_(txt_update_pos)
+            txt[:-origin_bsz, context_pad_len:] = txt[:-origin_bsz, context_pad_len:] + txt_update_pos
             del txt_update_pos
 
             # Apply to negative part (last origin_bsz batches)
             txt_update_neg = apply_mod(txt_proj_neg, txt_mod1.gate[-origin_bsz:], None, modulation_dims_txt)
             del txt_proj_neg
-            txt[-origin_bsz:, nag_pad_len:].add_(txt_update_neg)
+            txt[-origin_bsz:, nag_pad_len:] = txt[-origin_bsz:, nag_pad_len:] + txt_update_neg
             del txt_update_neg
         else:
             txt_proj = self.txt_attn.proj(txt_attn_pos)
             del txt_attn_pos
-            txt.add_(apply_mod(txt_proj, txt_mod1.gate, None, modulation_dims_txt))
+            txt = txt + apply_mod(txt_proj, txt_mod1.gate, None, modulation_dims_txt)
             del txt_proj
 
         # MLP
@@ -253,7 +274,7 @@ class NAGKleinDoubleStreamBlock:
         txt_mlp_out = self.txt_mlp(txt_mlp_in)
         del txt_mlp_in
 
-        txt.add_(apply_mod(txt_mlp_out, txt_mod2.gate, None, modulation_dims_txt))
+        txt = txt + apply_mod(txt_mlp_out, txt_mod2.gate, None, modulation_dims_txt)
         del txt_mlp_out
 
         if txt.dtype == torch.float16:
@@ -350,10 +371,10 @@ class NAGKleinSingleStreamBlock:
             del q, k, v, mlp
 
             # Compute attention - sequential to reduce peak memory
-            attn_positive = attention(q_positive, k_positive, v_positive, pe=pe, mask=attn_mask, transformer_options=transformer_options)
+            attn_positive = batched_attention(q_positive, k_positive, v_positive, pe, attn_mask, transformer_options)
             del q_positive, k_positive, v_positive
 
-            attn_negative = attention(q_negative, k_negative, v_negative, pe=pe_negative, mask=attn_mask, transformer_options=transformer_options)
+            attn_negative = batched_attention(q_negative, k_negative, v_negative, pe_negative, attn_mask, transformer_options)
             del q_negative, k_negative, v_negative
 
             # Extract image attention for NAG
@@ -398,7 +419,7 @@ class NAGKleinSingleStreamBlock:
             else:
                 # neg_img_bsz > pos_img_bsz - expand positive
                 repeat_times = (neg_img_bsz + pos_img_bsz - 1) // pos_img_bsz
-                img_attn_pos_expanded = img_attn_positive.expand(neg_img_bsz, -1, -1) if pos_img_bsz == 1 else img_attn_positive.repeat(repeat_times, 1, 1)[-neg_img_bsz:]
+                img_attn_pos_expanded = img_attn_positive.repeat(repeat_times, 1, 1)[-neg_img_bsz:]
                 img_attn_guided = nag(
                     img_attn_pos_expanded,
                     img_attn_negative,
@@ -422,7 +443,7 @@ class NAGKleinSingleStreamBlock:
                         attn_out_negative = torch.cat([txt_attn_negative, img_attn_guided[-txt_attn_negative.shape[0]:]], dim=1)
                     else:
                         repeat_times = (txt_attn_negative.shape[0] + img_attn_guided.shape[0] - 1) // img_attn_guided.shape[0]
-                        img_guided_expanded = img_attn_guided.expand(txt_attn_negative.shape[0], -1, -1) if img_attn_guided.shape[0] == 1 else img_attn_guided.repeat(repeat_times, 1, 1)[:txt_attn_negative.shape[0]]
+                        img_guided_expanded = img_attn_guided.repeat(repeat_times, 1, 1)[:txt_attn_negative.shape[0]]
                         attn_out_negative = torch.cat([txt_attn_negative, img_guided_expanded], dim=1)
             else:
                 attn_out_positive = torch.cat([img_attn_guided, txt_attn_positive], dim=1)
@@ -433,7 +454,7 @@ class NAGKleinSingleStreamBlock:
                         attn_out_negative = torch.cat([img_attn_guided[-txt_attn_negative.shape[0]:], txt_attn_negative], dim=1)
                     else:
                         repeat_times = (txt_attn_negative.shape[0] + img_attn_guided.shape[0] - 1) // img_attn_guided.shape[0]
-                        img_guided_expanded = img_attn_guided.expand(txt_attn_negative.shape[0], -1, -1) if img_attn_guided.shape[0] == 1 else img_attn_guided.repeat(repeat_times, 1, 1)[:txt_attn_negative.shape[0]]
+                        img_guided_expanded = img_attn_guided.repeat(repeat_times, 1, 1)[:txt_attn_negative.shape[0]]
                         attn_out_negative = torch.cat([img_guided_expanded, txt_attn_negative], dim=1)
 
             del txt_attn_positive, txt_attn_negative, img_attn_guided
@@ -463,12 +484,12 @@ class NAGKleinSingleStreamBlock:
             if txt_length is not None:
                 update_pos = apply_mod(output_positive, mod.gate[:-origin_bsz], None, modulation_dims)
                 del output_positive
-                x[:-origin_bsz, context_pad_len:].add_(update_pos)
+                x[:-origin_bsz, context_pad_len:] = x[:-origin_bsz, context_pad_len:] + update_pos
                 del update_pos
 
                 update_neg = apply_mod(output_negative, mod.gate[-origin_bsz:], None, modulation_dims)
                 del output_negative
-                x[-origin_bsz:, nag_pad_len:].add_(update_neg)
+                x[-origin_bsz:, nag_pad_len:] = x[-origin_bsz:, nag_pad_len:] + update_neg
                 del update_neg
             else:
                 gate_pos = mod.gate[:-origin_bsz]
@@ -478,16 +499,16 @@ class NAGKleinSingleStreamBlock:
                 update_pos_txt = apply_mod(output_positive[:, img_length:], gate_pos, None, modulation_dims)
                 del output_positive
 
-                x[:-origin_bsz, :img_length].add_(update_pos_img)
-                x[:-origin_bsz, img_length + context_pad_len:].add_(update_pos_txt)
+                x[:-origin_bsz, :img_length] = x[:-origin_bsz, :img_length] + update_pos_img
+                x[:-origin_bsz, img_length + context_pad_len:] = x[:-origin_bsz, img_length + context_pad_len:] + update_pos_txt
                 del update_pos_img, update_pos_txt
 
                 update_neg_img = apply_mod(output_negative[:, :img_length], gate_neg, None, modulation_dims)
                 update_neg_txt = apply_mod(output_negative[:, img_length:], gate_neg, None, modulation_dims)
                 del output_negative
 
-                x[-origin_bsz:, :img_length].add_(update_neg_img)
-                x[-origin_bsz:, img_length + nag_pad_len:].add_(update_neg_txt)
+                x[-origin_bsz:, :img_length] = x[-origin_bsz:, :img_length] + update_neg_img
+                x[-origin_bsz:, img_length + nag_pad_len:] = x[-origin_bsz:, img_length + nag_pad_len:] + update_neg_txt
                 del update_neg_img, update_neg_txt
         else:
             # No NAG, standard forward
@@ -499,7 +520,7 @@ class NAGKleinSingleStreamBlock:
             q, k, v = qkv.view(qkv.shape[0], qkv.shape[1], 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
             q, k = self.norm(q, k, v)
 
-            attn = attention(q, k, v, pe=pe, mask=attn_mask, transformer_options=transformer_options)
+            attn = batched_attention(q, k, v, pe, attn_mask, transformer_options)
 
             if hasattr(self, 'yak_mlp') and self.yak_mlp:
                 mlp_out = self.mlp_act(mlp[..., self.mlp_hidden_dim_first // 2:]) * mlp[..., :self.mlp_hidden_dim_first // 2]
@@ -507,7 +528,7 @@ class NAGKleinSingleStreamBlock:
                 mlp_out = self.mlp_act(mlp)
 
             output = self.linear2(torch.cat((attn, mlp_out), dim=2))
-            x.add_(apply_mod(output, mod.gate, None, modulation_dims))
+            x = x + apply_mod(output, mod.gate, None, modulation_dims)
 
         if x.dtype == torch.float16:
             x = torch.nan_to_num(x, nan=0.0, posinf=65504, neginf=-65504)
